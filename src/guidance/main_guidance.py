@@ -73,7 +73,7 @@ def main(cfg: DictConfig):
         datamodule = zinc_dataset.MosesDataModule(cfg)
         dataset_infos = zinc_dataset.MOSESinfos(datamodule,cfg)
         datamodule.prepare_data()
-        train_smiles = pd.read_csv("/root/DiGress/src/datasets/zinc/raw/zinc_train.csv")["smiles"].tolist()
+        train_smiles = pd.read_csv(home_prefix+"/datasets/zinc/raw/zinc_train.csv")["smiles"].tolist()
     else:
         datamodule = qm9_dataset.QM9DataModule(cfg, regressor=True)
         dataset_infos = qm9_dataset.QM9infos(datamodule=datamodule, cfg=cfg)
