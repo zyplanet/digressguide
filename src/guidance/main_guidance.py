@@ -56,16 +56,23 @@ def setup_wandb(cfg):
     wandb.save('*.txt')
     return cfg
 
-
-@hydra.main(config_path='../../configs', config_name='config')
+import sys
+import pandas as pd
+@hydra.main(version_base='1.1', config_path='./../../configs', config_name='config')
 def main(cfg: DictConfig):
     dataset_config = cfg["dataset"]
     # assert dataset_config.name == "qm9", "Only QM9 dataset is supported for now"
     workdir = os.getcwd()
     print("os working dir",workdir)
+    if "multirun" in workdir:
+        home_prefix = "./../../../../"
+    else:
+        home_prefix = "./../../../"
+    # sys.exit()
     if dataset_config.name == "zinc":
         datamodule = zinc_dataset.MosesDataModule(cfg)
         dataset_infos = zinc_dataset.MOSESinfos(datamodule,cfg)
+        datamodule.prepare_data()
         train_smiles = pd.read_csv("/root/DiGress/src/datasets/zinc/raw/zinc_train.csv")["smiles"].tolist()
     else:
         datamodule = qm9_dataset.QM9DataModule(cfg, regressor=True)
@@ -79,31 +86,32 @@ def main(cfg: DictConfig):
     else:
         extra_features = DummyExtraFeatures()
         domain_features = DummyExtraFeatures()
-
+    
     dataset_infos.compute_input_output_dims(datamodule=datamodule, extra_features=extra_features,
                                             domain_features=domain_features)
-    if dataset_config.name == "zinc":
-        dataset_infos.output_dims = {'X': 0, 'E': 0, 'y': 1}
-    else:
-        dataset_infos.output_dims = {'X': 0, 'E': 0, 'y': 2 if cfg.general.guidance_target == 'both' else 1}
+    # if dataset_config.name == "zinc":
+    #     dataset_infos.output_dims = {'X': 0, 'E': 0, 'y': 0}
+    # else:
+    #     dataset_infos.output_dims = {'X': 0, 'E': 0, 'y': 2 if cfg.general.guidance_target == 'both' else 1}
     train_metrics = TrainMolecularMetricsDiscrete(dataset_infos)
     sampling_metrics = SamplingMolecularMetrics(dataset_infos, train_smiles)
     visualization_tools = MolecularVisualization(cfg.dataset.remove_h, dataset_infos=dataset_infos)
-
+    
     model_kwargs = {'dataset_infos': dataset_infos, 'train_metrics': train_metrics,
                     'sampling_metrics': sampling_metrics, 'visualization_tools': visualization_tools,
                     'extra_features': extra_features, 'domain_features': domain_features, 'load_model': True}
 
     # When testing, previous configuration is fully loaded
-    cfg_pretrained, guidance_sampling_model = get_resume(cfg, model_kwargs)
-
-    OmegaConf.set_struct(cfg, True)
-    with open_dict(cfg):
-        cfg.model = cfg_pretrained.model
-    model_kwargs['load_model'] = False
-
+    guidance_sampling_model = DiscreteDenoisingDiffusion(cfg, **model_kwargs)
+    # cfg_pretrained, guidance_sampling_model = get_resume(cfg, model_kwargs)
+    
+    # OmegaConf.set_struct(cfg, True)
+    # with open_dict(cfg):
+    #     cfg.model = cfg_pretrained.model
+    # model_kwargs['load_model'] = False
+    print("hahahah")
     utils.create_folders(cfg)
-    cfg = setup_wandb(cfg)
+    # cfg = setup_wandb(cfg)
 
     # load pretrained regressor
     # Fetch path to this file to get base path
@@ -126,12 +134,30 @@ def main(cfg: DictConfig):
                       enable_progress_bar=False,
                       logger=[],
                       )
-
+    print("hahahahaahah")
     # add for conditional sampling
     model = guidance_sampling_model
     model.args = cfg
     model.guidance_model = guidance_model
-    trainer.test(model, datamodule=datamodule, ckpt_path=None)
+    sd_dict = {"planar":home_prefix+"pretrained/planarpretrained.pt",
+                    "sbm":home_prefix+"pretrained/sbmpretrained.pt",
+                    "zinc":home_prefix+"pretrained/zincpretrained.pt",
+                    "moses":home_prefix+"pretrained/mosespretrained.pt"}
+    # sd_dict = {}
+    print("load path is {}".format(sd_dict[cfg.dataset.name]))
+    if dataset_config.name == "zinc":
+        sd = torch.load(sd_dict[cfg.dataset.name])
+        new_sd = {}
+        for k,v in sd.items():
+            # print(k,v.shape)
+            if "model" in k:
+                new_sd[k[6:]]=v
+        model.model.load_state_dict(new_sd)
+        model.model.cuda()
+        print("load pretrained model")
+    # sys.exit()
+    print("load from check point")
+    trainer.test(model, datamodule=datamodule)
 
 
 if __name__ == '__main__':

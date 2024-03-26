@@ -10,7 +10,7 @@ except ModuleNotFoundError as e:
     warn("Didn't find rdkit, this will fail")
     assert use_rdkit, "Didn't find rdkit"
 
-
+from collections import defaultdict
 allowed_bonds = {'H': 1, 'C': 4, 'N': 3, 'O': 2, 'F': 1, 'B': 3, 'Al': 3, 'Si': 4, 'P': [3, 5],
                  'S': 4, 'Cl': 1, 'As': 3, 'Br': 1, 'I': 1, 'Hg': [1, 2], 'Bi': [3, 5], 'Se': [2, 4, 6]}
 bond_dict = [None, Chem.rdchem.BondType.SINGLE, Chem.rdchem.BondType.DOUBLE, Chem.rdchem.BondType.TRIPLE,
@@ -332,3 +332,185 @@ def compute_molecular_metrics(molecule_list, train_smiles, dataset_info, trainer
         trainer.log("nc_mu", nc["nc_mu"], reduce_fx="mean")
 
     return validity_dict, rdkit_metrics, all_smiles
+
+class BasicMolecularMetricslist(object):
+    def __init__(self, dataset_info, train_smiles=None):
+        self.atom_decoder = dataset_info.atom_decoder
+        self.dataset_info = dataset_info
+
+        # Retrieve dataset smiles only for qm9 currently.
+        self.dataset_smiles_list = train_smiles
+
+    def compute_validity(self, generated):
+        """ generated: list of couples (positions, atom_types)"""
+        valid = []
+        num_components = []
+        all_smiles = []
+        valid_list = []
+        reward_list = []
+        for graph in generated:
+            atom_types, edge_types = graph
+            mol = build_molecule(atom_types, edge_types,
+                                 self.dataset_info.atom_decoder)
+            try:
+                smiles = mol2smiles(mol)
+            except:
+                smiles = None
+            try:
+                mol_frags = Chem.rdmolops.GetMolFrags(
+                    mol, asMols=True, sanitizeFrags=True)
+                num_components.append(len(mol_frags))
+            except:
+                pass
+            if smiles is not None:
+                try:
+                    mol_frags = Chem.rdmolops.GetMolFrags(
+                        mol, asMols=True, sanitizeFrags=True)
+                    largest_mol = max(mol_frags, default=mol,
+                                      key=lambda m: m.GetNumAtoms())
+                    smiles = mol2smiles(largest_mol)
+                    valid.append(smiles)
+                    all_smiles.append(smiles)
+                    valid_list.append(1)
+                    reward_list.append(1)
+                except Chem.rdchem.AtomValenceException:
+                    print("Valence error in GetmolFrags")
+                    all_smiles.append(None)
+                    valid_list.append(0)
+                    reward_list.append(0.)
+                except Chem.rdchem.KekulizeException:
+                    print("Can't kekulize molecule")
+                    all_smiles.append(None)
+                    valid_list.append(0)
+                    reward_list.append(0.)
+            else:
+                all_smiles.append(None)
+                valid_list.append(0)
+                reward_list.append(0)
+        freq_list = [0]*len(generated)
+        freq_dict = defaultdict(int)
+        for smile in all_smiles:
+            if smile is not None:
+                freq_dict[smile]+=1
+        for idx,smile in enumerate(all_smiles):
+            if smile is not None:
+                freq_list[idx] = freq_dict[smile]
+        
+        uniq,uniq_r = self.compute_uniqueness(valid)
+
+        return valid, len(valid) / len(generated), np.array(num_components), all_smiles,valid_list,uniq,freq_list,reward_list 
+    def get_smiles(self,generated):
+        smile_list = []
+        for graph in generated:
+            atom_types, edge_types = graph
+            mol = build_molecule(atom_types, edge_types,
+                                 self.dataset_info.atom_decoder)
+            try:
+                smiles = mol2smiles(mol)
+            except:
+                smiles = None
+            if smiles is not None:
+                try:
+                    mol_frags = Chem.rdmolops.GetMolFrags(
+                        mol, asMols=True, sanitizeFrags=True)
+                    largest_mol = max(mol_frags, default=mol,
+                                      key=lambda m: m.GetNumAtoms())
+                    smiles = mol2smiles(largest_mol)
+                    smile_list.append(smiles)
+                except Chem.rdchem.AtomValenceException:
+                    print("Valence error in GetmolFrags")
+                    smile_list.append(None)
+                except Chem.rdchem.KekulizeException:
+                    print("Can't kekulize molecule")
+                    smile_list.append(None)
+            else:
+                smile_list.append(None)
+        freq_list = [0]*len(generated)
+        freq_dict = defaultdict(int)
+        for smile in smile_list:
+            if smile is not None:
+                freq_dict[smile]+=1
+        for idx,smile in enumerate(smile_list):
+            if smile is not None:
+                freq_list[idx] = freq_dict[smile]
+        valid = [x for x in smile_list if x is not None]
+        valid_r = len(valid)/len(smile_list)
+        uniq,uniq_r = self.compute_uniqueness(valid)
+        return smile_list,valid_r,uniq,uniq_r,freq_list
+
+    def compute_uniqueness(self, valid):
+        """ valid: list of SMILES strings."""
+        return list(set(valid)), len(set(valid)) / (len(valid)+1e-8)
+
+    def compute_novelty(self, unique):
+        num_novel = 0
+        novel = []
+        if self.dataset_smiles_list is None:
+            print("Dataset smiles is None, novelty computation skipped")
+            return 1, 1
+        for smiles in unique:
+            if smiles not in self.dataset_smiles_list:
+                novel.append(smiles)
+                num_novel += 1
+        return novel, num_novel / len(unique)
+
+    def compute_relaxed_validity(self, generated):
+        valid = []
+        for graph in generated:
+            atom_types, edge_types = graph
+            mol = build_molecule_with_partial_charges(
+                atom_types, edge_types, self.dataset_info.atom_decoder)
+            smiles = mol2smiles(mol)
+            if smiles is not None:
+                try:
+                    mol_frags = Chem.rdmolops.GetMolFrags(
+                        mol, asMols=True, sanitizeFrags=True)
+                    largest_mol = max(mol_frags, default=mol,
+                                      key=lambda m: m.GetNumAtoms())
+                    smiles = mol2smiles(largest_mol)
+                    valid.append(smiles)
+                except Chem.rdchem.AtomValenceException:
+                    print("Valence error in GetmolFrags")
+                except Chem.rdchem.KekulizeException:
+                    print("Can't kekulize molecule")
+        return valid, len(valid) / len(generated)
+
+    def evaluate(self, generated):
+        """ generated: list of pairs (positions: n x 3, atom_types: n [int])
+            the positions and atom types should already be masked. """
+        valid, validity, num_components, all_smiles,valid_list,uniq,freq_list,reward_list = self.compute_validity(
+            generated)
+        # nc_mu = num_components.mean() if len(num_components) > 0 else 0
+        # nc_min = num_components.min() if len(num_components) > 0 else 0
+        # nc_max = num_components.max() if len(num_components) > 0 else 0
+        # print(
+        #     f"Validity over {len(generated)} molecules: {validity * 100 :.2f}%")
+        # print(
+        #     f"Number of connected components of {len(generated)} molecules: min:{nc_min:.2f} mean:{nc_mu:.2f} max:{nc_max:.2f}")
+
+        # relaxed_valid, relaxed_validity = self.compute_relaxed_validity(
+        #     generated)
+        # print(
+        #     f"Relaxed validity over {len(generated)} molecules: {relaxed_validity * 100 :.2f}%")
+        # if relaxed_validity > 0:
+        #     unique, uniqueness = self.compute_uniqueness(relaxed_valid)
+        #     print(
+        #         f"Uniqueness over {len(relaxed_valid)} valid molecules: {uniqueness * 100 :.2f}%")
+
+        #     if self.dataset_smiles_list is not None:
+        #         _, novelty = self.compute_novelty(unique)
+        #         print(
+        #             f"Novelty over {len(unique)} unique valid molecules: {novelty * 100 :.2f}%")
+        #     else:
+        #         novelty = -1.0
+        # else:
+        #     novelty = -1.0
+        #     uniqueness = 0.0
+        #     unique = []
+        return valid_list,uniq,freq_list,reward_list
+
+
+def gen_smile_list(molecule_list,dataset_info):
+    metrics = BasicMolecularMetricslist(dataset_info, dataset_info.train_smiles)
+    smile_list,valid_r,uniq,uniq_r,freq_list = metrics.get_smiles(molecule_list)
+    return smile_list,valid_r,uniq,uniq_r,freq_list

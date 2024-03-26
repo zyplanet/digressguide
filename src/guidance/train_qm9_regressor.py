@@ -86,7 +86,7 @@ def main(cfg: DictConfig):
                                               filename=cfg.general.target+'{val/epoch_mae:.4f}_{epoch}',
                                               monitor='val/epoch_mae',
                                               save_last=True,
-                                              save_top_k=10,    # was 5
+                                              save_top_k=20,    # was 5
                                               mode='min',
                                               every_n_epochs=1)
         print("Checkpoints will be logged to", checkpoint_callback.dirpath)

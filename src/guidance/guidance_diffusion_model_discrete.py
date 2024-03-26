@@ -15,7 +15,7 @@ import networkx as nx
 from src.metrics.abstract_metrics import NLL, SumExceptBatchKL, SumExceptBatchMetric
 from src.metrics.train_metrics import TrainLossDiscrete
 import src.utils as utils
-
+from tqdm import tqdm
 # packages for conditional generation with guidance
 from torchmetrics import MeanSquaredError, MeanAbsoluteError
 from rdkit.Chem.rdDistGeom import ETKDGv3, EmbedMolecule
@@ -27,6 +27,7 @@ try:
 except ModuleNotFoundError:
     print("PSI4 not found")
 from src.analysis.rdkit_functions import build_molecule, mol2smiles, build_molecule_with_partial_charges
+from src.analysis.rdkit_functions import gen_smile_list
 import pickle
 import pandas as pd
 
@@ -134,39 +135,69 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
     @torch.enable_grad()
     @torch.inference_mode(False)
     def test_step(self, data, i):
-        print(f'Select No.{i+1} test molecule')
-        # Extract properties
-        target_properties = data.y.clone()
+        pass
+        # print(f'Select No.{i+1} test molecule')
+        # # Extract properties
+        # target_properties = (data.y.clone())**0.6
+        
+        # data.y = torch.zeros(data.y.shape[0], 0).type_as(data.y)
+        # print("TARGET PROPERTIES", target_properties)
 
-        data.y = torch.zeros(data.y.shape[0], 0).type_as(data.y)
-        print("TARGET PROPERTIES", target_properties)
+        # start = time.time()
 
-        start = time.time()
+        # ident = 0
+        # samples = self.sample_batch(batch_id=ident, batch_size=10, num_nodes=None,
+        #                             save_final=10,
+        #                             keep_chain=1,
+        #                             number_chain_steps=self.number_chain_steps,
+        #                             input_properties=target_properties)
+        # print(f'Sampling took {time.time() - start:.2f} seconds\n')
 
-        ident = 0
-        samples = self.sample_batch(batch_id=ident, batch_size=10, num_nodes=None,
-                                    save_final=10,
-                                    keep_chain=1,
-                                    number_chain_steps=self.number_chain_steps,
-                                    input_properties=target_properties)
-        print(f'Sampling took {time.time() - start:.2f} seconds\n')
+        # # self.save_cond_samples(samples, target_properties, file_path=os.path.join(os.getcwd(), f'cond_smiles{i}.pkl'))
+        # logfile = "smiles_{}_{}"
+        # # save conditional generated samples
+        # # mae = self.cond_sample_metric(samples, target_properties)
+        # return {'mae': mae}
 
-        self.save_cond_samples(samples, target_properties, file_path=os.path.join(os.getcwd(), f'cond_smiles{i}.pkl'))
-        # save conditional generated samples
-        mae = self.cond_sample_metric(samples, target_properties)
-        return {'mae': mae}
-
+    @torch.enable_grad()
+    @torch.inference_mode(False)
     def test_epoch_end(self, outs) -> None:
         """ Measure likelihood on a test set and compute stability metrics. """
-        final_mae = self.cond_val.compute()
-        final_validity = self.num_valid_molecules / self.num_total
-        print("Final MAE", final_mae)
-        print("Final validity", final_validity * 100)
-
-        wandb.run.summary['final_MAE'] = final_mae
-        wandb.run.summary['final_validity'] = final_validity
-        wandb.log({'final mae': final_mae,
-                   'final validity': final_validity})
+        target_properties = torch.zeros(size=(1, 1), dtype=torch.float)
+        target_dict = {
+            "parp1": 0.3179,
+            "fa7": 0.2616,
+            "5ht1b": 0.3162,
+            "braf": 0.3180,
+            "jak2": 0.3035
+        }
+        target_properties[:,0] = target_dict[self.cfg.general.target]
+        target_properties = target_properties.cuda()
+        gen_num = 1024
+        batch_size = 256
+        smiles = []
+        print("start generate for {}, target prop is {}".format(self.cfg.general.target,target_dict[self.cfg.general.target]))
+        workdir = os.getcwd()
+        if "multirun" in workdir:
+            home_prefix = "./../../../../"
+        else:
+            home_prefix = "./../../../"
+        for k in tqdm(range(gen_num//batch_size)):
+            ident = 0
+            samples = self.sample_batch(batch_id=ident, batch_size=batch_size, num_nodes=None,
+                                        save_final=10,
+                                        keep_chain=1,
+                                        number_chain_steps=self.number_chain_steps,
+                                        input_properties=target_properties)
+            smiles.extend(samples)
+        val_smiles = [x for x in smiles if x is not None]
+        valid_r = 100*len(val_smiles)/len(smiles)
+        save_file = home_prefix+"gen_smile_{}_num{}_val{:.2f}.txt".format(self.cfg.general.target,gen_num,valid_r)
+        with open(save_file,"w") as f:
+            for smi in val_smiles:
+                f.write(smi+"\n")
+        f.close()
+        
 
     def apply_noise(self, X, E, y, node_mask):
         """ Sample noise and apply it to the data. """
@@ -242,11 +273,11 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         assert (E == torch.transpose(E, 1, 2)).all()
         assert number_chain_steps < self.T
-        chain_X_size = torch.Size((number_chain_steps, keep_chain, X.size(1)))
-        chain_E_size = torch.Size((number_chain_steps, keep_chain, E.size(1), E.size(2)))
+        # chain_X_size = torch.Size((number_chain_steps, keep_chain, X.size(1)))
+        # chain_E_size = torch.Size((number_chain_steps, keep_chain, E.size(1), E.size(2)))
 
-        chain_X = torch.zeros(chain_X_size)
-        chain_E = torch.zeros(chain_E_size)
+        # chain_X = torch.zeros(chain_X_size)
+        # chain_E = torch.zeros(chain_E_size)
 
         # Iteratively sample p(z_s | z_t) for t = 1, ..., T, with s = t - 1.
         for s_int in reversed(range(0, self.T)):
@@ -261,33 +292,33 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
             # Save the first keep_chain graphs
             write_index = (s_int * number_chain_steps) // self.T
-            chain_X[write_index] = discrete_sampled_s.X[:keep_chain]
-            chain_E[write_index] = discrete_sampled_s.E[:keep_chain]
+            # chain_X[write_index] = discrete_sampled_s.X[:keep_chain]
+            # chain_E[write_index] = discrete_sampled_s.E[:keep_chain]
 
         # Sample
         sampled_s = sampled_s.mask(node_mask, collapse=True)
         X, E, y = sampled_s.X, sampled_s.E, sampled_s.y
 
-        print("Examples of generated graphs:")
-        for i in range(min(5, X.shape[0])):
-            print("E: ", E[i])
-            print("X: ", X[i])
+        # print("Examples of generated graphs:")
+        # for i in range(min(5, X.shape[0])):
+        #     print("E: ", E[i])
+        #     print("X: ", X[i])
 
-        # Prepare the chain for saving
-        if keep_chain > 0:
-            final_X_chain = X[:keep_chain]
-            final_E_chain = E[:keep_chain]
+        # # Prepare the chain for saving
+        # if keep_chain > 0:
+        #     final_X_chain = X[:keep_chain]
+        #     final_E_chain = E[:keep_chain]
 
-            chain_X[0] = final_X_chain                  # Overwrite last frame with the resulting X, E
-            chain_E[0] = final_E_chain
+        #     chain_X[0] = final_X_chain                  # Overwrite last frame with the resulting X, E
+        #     chain_E[0] = final_E_chain
 
-            chain_X = diffusion_utils.reverse_tensor(chain_X)
-            chain_E = diffusion_utils.reverse_tensor(chain_E)
+        #     chain_X = diffusion_utils.reverse_tensor(chain_X)
+        #     chain_E = diffusion_utils.reverse_tensor(chain_E)
 
-            # Repeat last frame to see final sample better
-            chain_X = torch.cat([chain_X, chain_X[-1:].repeat(10, 1, 1)], dim=0)
-            chain_E = torch.cat([chain_E, chain_E[-1:].repeat(10, 1, 1, 1)], dim=0)
-            assert chain_X.size(0) == (number_chain_steps + 10)
+        #     # Repeat last frame to see final sample better
+        #     chain_X = torch.cat([chain_X, chain_X[-1:].repeat(10, 1, 1)], dim=0)
+        #     chain_E = torch.cat([chain_E, chain_E[-1:].repeat(10, 1, 1, 1)], dim=0)
+        #     assert chain_X.size(0) == (number_chain_steps + 10)
 
         molecule_list = []
         for i in range(batch_size):
@@ -296,30 +327,30 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             edge_types = E[i, :n, :n].cpu()
             molecule_list.append([atom_types, edge_types])
 
-        # Visualize chains
-        if self.visualization_tools is not None:
-            print('Visualizing chains starts!')
-            current_path = os.getcwd()
-            num_molecules = chain_X.size(1)       # number of molecules
-            for i in range(num_molecules):
-                result_path = os.path.join(current_path, f'chains/{self.args.general.name}/'
-                                                         f'epoch{self.current_epoch}/'
-                                                         f'chains/molecule_{batch_id + i}')
-                if not os.path.exists(result_path):
-                    os.makedirs(result_path)
-                    _ = self.visualization_tools.visualize_chain(result_path,
-                                                                 chain_X[:, i, :].numpy(),
-                                                                 chain_E[:, i, :].numpy())
-                print('\r{}/{} complete'.format(i+1, num_molecules), end='', flush=True)
-            print('\nVisualizing chains Ends!')
+        # # Visualize chains
+        # if self.visualization_tools is not None:
+        #     print('Visualizing chains starts!')
+        #     current_path = os.getcwd()
+        #     num_molecules = chain_X.size(1)       # number of molecules
+        #     for i in range(num_molecules):
+        #         result_path = os.path.join(current_path, f'chains/{self.args.general.name}/'
+        #                                                  f'epoch{self.current_epoch}/'
+        #                                                  f'chains/molecule_{batch_id + i}')
+        #         if not os.path.exists(result_path):
+        #             os.makedirs(result_path)
+        #             _ = self.visualization_tools.visualize_chain(result_path,
+        #                                                          chain_X[:, i, :].numpy(),
+        #                                                          chain_E[:, i, :].numpy())
+        #         print('\r{}/{} complete'.format(i+1, num_molecules), end='', flush=True)
+        #     print('\nVisualizing chains Ends!')
 
-            # Visualize the final molecules
-            current_path = os.getcwd()
-            result_path = os.path.join(current_path,
-                                       f'graphs/{self.name}/epoch{self.current_epoch}_b{batch_id}/')
-            self.visualization_tools.visualize(result_path, molecule_list, save_final)
-
-        return molecule_list
+        #     # Visualize the final molecules
+        #     current_path = os.getcwd()
+        #     result_path = os.path.join(current_path,
+        #                                f'graphs/{self.name}/epoch{self.current_epoch}_b{batch_id}/')
+        #     self.visualization_tools.visualize(result_path, molecule_list, save_final)
+        smiles,valid_r,uniq,uniq_r,freq_list = gen_smile_list(molecule_list,self.dataset_info)
+        return smiles
 
 
     def cond_sample_metric(self, samples, input_properties):
@@ -456,8 +487,8 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         print('Conditional generation metric:')
         print(f'Epoch {self.current_epoch}: MAE: {mae}')
-        wandb.log({"val_epoch/conditional generation mae": mae,
-                   'Valid molecules': num_valid_molecules})
+        # wandb.log({"val_epoch/conditional generation mae": mae,
+        #            'Valid molecules': num_valid_molecules})
         return mae
 
     def cond_fn(self, noisy_data, node_mask, target=None):
@@ -482,9 +513,9 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             mse = loss(pred.y, target.repeat(pred.y.size(0), 1))
 
             t_int = int(t[0].item() * 500)
-            if t_int % 10 == 0:
+            if t_int % 100 == 0:
                 print(f'Regressor MSE at step {t_int}: {mse.item()}')
-            wandb.log({'Guidance MSE': mse})
+            # wandb.log({'Guidance MSE': mse})
 
             # calculate gradient of mse with respect to x and e
             grad_x = torch.autograd.grad(mse, x_in, retain_graph=True)[0]

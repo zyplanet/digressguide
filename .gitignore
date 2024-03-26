@@ -35,7 +35,7 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
-
+gen*.txt
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
@@ -53,7 +53,7 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
-
+*.dat
 # Translations
 *.mo
 *.pot
@@ -67,10 +67,10 @@ db.sqlite3-journal
 # Flask stuff:
 instance/
 .webassets-cache
-
+multirun/
 # Scrapy stuff:
 .scrapy
-
+pretrained/
 # Sphinx documentation
 docs/_build/
 
